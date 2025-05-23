@@ -34,7 +34,7 @@ def validate_csrf_token(form_token):
 def create_connection():
     try:
         return pymysql.connect(
-            host='84.201.171.207',
+            host='51.250.35.238',
             user='u68593',
             password='9258357',
             database='web_db',
