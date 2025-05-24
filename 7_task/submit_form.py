@@ -97,6 +97,199 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
         """
     csrf_token_value = escape_html(generate_csrf_token())
 
+    # Подготовка данных для JavaScript
+    errors_js = json.dumps({k: v for k, v in errors.items() if v}, ensure_ascii=False)
+
+    script = f"""
+    document.addEventListener('DOMContentLoaded', function() {{
+        const form = document.getElementById('mainForm');
+        if (!form) return;
+        
+        // Показываем начальные ошибки
+        const initialErrors = {errors_js};
+        Object.keys(initialErrors).forEach(field => {{
+            const errorElement = document.querySelector(`span.${{field}}_error`);
+            if (errorElement) {{
+                errorElement.textContent = initialErrors[field];
+            }}
+            const inputElement = document.querySelector(`[name="${{field}}"]`) || 
+                               document.querySelector(`[name="${{field}}[]"]`);
+            if (inputElement) {{
+                inputElement.classList.add('error');
+            }}
+        }});
+
+        form.addEventListener('submit', function(e) {{
+            e.preventDefault();
+            const formData = {{
+                last_name: form.last_name.value,
+                first_name: form.first_name.value,
+                patronymic: form.patronymic.value,
+                phone: form.phone.value,
+                email: form.email.value,
+                birthdate: form.birthdate.value,
+                gender: form.querySelector('input[name="gender"]:checked')?.value,
+                languages: Array.from(form.querySelectorAll('select[name="languages[]"] option:checked')).map(o => o.value),
+                bio: form.bio.value,
+                contract: form.contract.checked
+            }};
+            
+            // Валидация
+            const errors = validateForm(formData);
+            displayErrors(errors);
+            
+            if (Object.keys(errors).length === 0) {{
+                const isLoggedIn = {str(is_logged_in).lower()};
+                const url = isLoggedIn ? '/api/profile/' + window.location.pathname.split('/').pop() : '/api/register';
+                const method = isLoggedIn ? 'PUT' : 'POST';
+                sendFormData(url, method, formData, isLoggedIn);
+            }}
+        }});
+
+        function validateForm(data) {{
+            const errors = {{}};
+            const patterns = {{
+                'last_name': /^[А-Яа-яЁё]+$/,
+                'first_name': /^[А-Яа-яЁё]+$/,
+                'patronymic': /^[А-Яа-яЁё]*$/,
+                'phone': /^\\+?\\d{{10,15}}$/,
+                'email': /^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$/,
+                'birthdate': /^\\d{{4}}-\\d{{2}}-\\d{{2}}$/,
+                'bio': /^.{{10,}}$/
+            }};
+            const messages = {{
+                'last_name': "Фамилия должна содержать только буквы кириллицы.",
+                'first_name': "Имя должно содержать только буквы кириллицы.",
+                'patronymic': "Отчество должно содержать только буквы кириллицы (если указано).",
+                'phone': "Телефон должен быть длиной от 10 до 15 цифр и может начинаться с '+'",
+                'email': "Некорректный email. Пример: example@domain.com",
+                'birthdate': "Дата рождения должна быть в формате YYYY-MM-DD.",
+                'bio': "Биография должна содержать не менее 10 символов.",
+                'gender': "Выберите пол.",
+                'languages': "Выберите хотя бы один язык программирования.",
+                'contract': "Необходимо подтвердить ознакомление с контрактом."
+            }};
+
+            for (const field in patterns) {{
+                if (data[field] && !patterns[field].test(data[field])) {{
+                    errors[field] = messages[field];
+                }}
+            }}
+            if (!data.gender) errors.gender = messages.gender;
+            if (!data.languages || data.languages.length === 0) errors.languages = messages.languages;
+            if (!data.contract) errors.contract = messages.contract;
+            return errors;
+        }}
+
+        function displayErrors(errors) {{
+            // Сначала очищаем все ошибки
+            document.querySelectorAll('.error-message').forEach(el => el.textContent = '');
+            document.querySelectorAll('.error').forEach(el => el.classList.remove('error'));
+            
+            // Затем добавляем новые
+            for (const field in errors) {{
+                const errorElement = document.querySelector(`span.${{field}}_error`);
+                let inputElement = document.querySelector(`[name="${{field}}"]`);
+                
+                if (!inputElement) {{
+                    // Для radio и checkbox
+                    inputElement = document.querySelector(`input[name="${{field}}"]`);
+                }}
+                
+                if (!inputElement && field === 'languages') {{
+                    inputElement = document.querySelector('select[name="languages[]"]');
+                }}
+                
+                if (errorElement) {{
+                    errorElement.textContent = errors[field];
+                }}
+                if (inputElement) {{
+                    inputElement.classList.add('error');
+                }}
+            }}
+        }}
+        
+        function sendFormData(url, method, data, isLoggedIn) {{
+            const headers = {{
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }};
+            if (isLoggedIn) {{
+                const username = document.cookie.replace(/(?:(?:^|.*;\\s*)username\\s*=\\s*([^;]*).*$)|^.*$/, "$1");
+                const password = document.cookie.replace(/(?:(?:^|.*;\\s*)password\\s*=\\s*([^;]*).*$)|^.*$/, "$1");
+                if (username && password) {{
+                    headers['Authorization'] = 'Basic ' + btoa(username + ':' + password);
+                }}
+            }}
+            fetch(url, {{
+                method: method,
+                headers: headers,
+                body: JSON.stringify(data)
+            }})
+            .then(response => response.json())
+            .then(data => {{
+                if (data.status === 'success') {{
+                    if (!isLoggedIn) {{
+                        showCredentials(data.credentials, data.profile_url);
+                    }} else {{
+                        alert('Данные успешно обновлены');
+                    }}
+                }} else {{
+                    if (data.errors) {{
+                        displayServerErrors(data.errors);
+                    }} else {{
+                        alert(data.message || 'Произошла ошибка');
+                    }}
+                }}
+            }})
+            .catch(error => {{
+                console.error('API error:', error);
+                form.submit();
+            }});
+        }}
+
+        function displayServerErrors(errors) {{
+            document.querySelectorAll('.error-message').forEach(el => el.textContent = '');
+            document.querySelectorAll('.error').forEach(el => el.classList.remove('error'));
+            for (const field in errors) {{
+                const errorElement = document.querySelector(`span.${{field}}_error`);
+                const inputElement = document.querySelector(`[name="${{field}}"]`) || 
+                                   document.querySelector(`[name="${{field}}[]"]`);
+                if (errorElement) {{
+                    errorElement.textContent = errors[field];
+                }}
+                if (inputElement) {{
+                    inputElement.classList.add('error');
+                }}
+            }}
+        }}
+
+        function showCredentials(credentials, profileUrl) {{
+            const credentialsDiv = document.createElement('div');
+            credentialsDiv.className = 'credentials';
+            credentialsDiv.innerHTML = `
+                <h3>Ваши учетные данные (сохраните их):</h3>
+                <p><strong>Логин:</strong> ${{credentials.username}}</p>
+                <p><strong>Пароль:</strong> ${{credentials.password}}</p>
+                <p><strong>Ссылка на профиль:</strong> ${{profileUrl}}</p>
+            `;
+            document.cookie = `username=${{credentials.username}}; path=/`;
+            document.cookie = `password=${{credentials.password}}; path=/`;
+            form.parentNode.insertBefore(credentialsDiv, form);
+            const logoutForm = document.createElement('form');
+            logoutForm.id = 'logoutForm';
+            logoutForm.action = 'submit_form.py';
+            logoutForm.method = 'POST';
+            logoutForm.innerHTML = `
+                <input type="hidden" name="action" value="logout">
+                <button type="submit" class="logout-button">Выйти</button>
+            `;
+            form.parentNode.insertBefore(logoutForm, form.nextSibling);
+            document.querySelector('.login-section').style.display = 'none';
+        }}
+    }});
+    """
+
     context = {
         'last_name': escape_html(data.get('last_name', '')),
         'first_name': escape_html(data.get('first_name', '')),
@@ -137,13 +330,14 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
         'email_error_class': 'error' if 'email' in errors else '',
         'birthdate_error_class': 'error' if 'birthdate' in errors else '',
         'bio_error_class': 'error' if 'bio' in errors else '',
-	'csrf_token': csrf_token_value,
+        'csrf_token': csrf_token_value,
         'login_section': login_section,
         'credentials_section': credentials_section,
-        'logout_button': logout_button
+        'logout_button': logout_button,
+        'script': script
     }
 
-    html = """
+    html_template = """
     <!DOCTYPE html>
     <html lang="ru">
     <head>
@@ -152,161 +346,7 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
         <title>Форма</title>
         <link rel="stylesheet" href="styles.css">
         <script>
-            document.addEventListener('DOMContentLoaded', function() {{
-                const form = document.getElementById('mainForm');
-                if (!form) return;
-                form.addEventListener('submit', function(e) {{
-                    e.preventDefault();
-                    const formData = {{
-                        last_name: form.last_name.value,
-                        first_name: form.first_name.value,
-                        patronymic: form.patronymic.value,
-                        phone: form.phone.value,
-                        email: form.email.value,
-                        birthdate: form.birthdate.value,
-                        gender: form.querySelector('input[name="gender"]:checked')?.value,
-                        languages: Array.from(form.querySelectorAll('select[name="languages[]"] option:checked')).map(o => o.value),
-                        bio: form.bio.value,
-                        contract: form.contract.checked
-                    }};
-                    const errors = validateForm(formData);
-                    if (Object.keys(errors).length > 0) {{
-                        displayErrors(errors);
-                        return;
-                    }}
-                    const isLoggedIn = {is_logged_in};
-                    const url = isLoggedIn ? '/api/profile/' + window.location.pathname.split('/').pop() : '/api/register';
-                    const method = isLoggedIn ? 'PUT' : 'POST';
-                    sendFormData(url, method, formData, isLoggedIn);
-                }});
-                function validateForm(data) {{
-                    const errors = {{}};
-                    const patterns = {{
-                        'last_name': /^[А-Яа-яЁё]+$/,
-                        'first_name': /^[А-Яа-яЁё]+$/,
-                        'patronymic': /^[А-Яа-яЁё]*$/,
-                        'phone': /^\\+?\\d{{10,15}}$/,
-                        'email': /^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$/,
-                        'birthdate': /^\\d{{4}}-\\d{{2}}-\\d{{2}}$/,
-                        'bio': /^.{{10,}}$/
-                    }};
-                    for (const field in patterns) {{
-                        if (data[field] && !patterns[field].test(data[field])) {{
-                            errors[field] = true;
-                        }}
-                    }}
-                    if (!data.gender) errors.gender = true;
-                    if (!data.languages || data.languages.length === 0) errors.languages = true;
-                    if (!data.contract) errors.contract = true;
-                    return errors;
-                }}
-                function displayErrors(errors) {{
-                    document.querySelectorAll('.error-message').forEach(el => el.textContent = '');
-                    document.querySelectorAll('.error').forEach(el => el.classList.remove('error'));
-                    for (const field in errors) {{
-                        const errorElement = document.querySelector(`span.${{field}}_error`);
-                        const inputElement = document.querySelector(`[name="${{field}}"]`) || 
-                                           document.querySelector(`[name="${{field}}[]"]`);
-                        if (errorElement) {{
-                            errorElement.textContent = getErrorMessage(field);
-                        }}
-                        if (inputElement) {{
-                            inputElement.classList.add('error');
-                        }}
-                    }}
-                }}
-                function getErrorMessage(field) {{
-                    const messages = {{
-                        'last_name': "Фамилия должна содержать только буквы кириллицы.",
-                        'first_name': "Имя должно содержать только буквы кириллицы.",
-                        'patronymic': "Отчество должно содержать только буквы кириллицы (если указано).",
-                        'phone': "Телефон должен быть длиной от 10 до 15 цифр и может начинаться с '+'",
-                        'email': "Некорректный email. Пример: example@domain.com",
-                        'birthdate': "Дата рождения должна быть в формате YYYY-MM-DD.",
-                        'bio': "Биография должна содержать не менее 10 символов.",
-                        'gender': "Выберите пол.",
-                        'languages': "Выберите хотя бы один язык программирования.",
-                        'contract': "Необходимо подтвердить ознакомление с контрактом."
-                    }};
-                    return messages[field] || 'Ошибка в поле';
-                }}
-                function sendFormData(url, method, data, isLoggedIn) {{
-                    const headers = {{
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json'
-                    }};
-                    if (isLoggedIn) {{
-                        const username = document.cookie.replace(/(?:(?:^|.*;\s*)username\s*=\s*([^;]*).*$)|^.*$/, "$1");
-                        const password = document.cookie.replace(/(?:(?:^|.*;\s*)password\s*=\s*([^;]*).*$)|^.*$/, "$1");
-                        if (username && password) {{
-                            headers['Authorization'] = 'Basic ' + btoa(username + ':' + password);
-                        }}
-                    }}
-                    fetch(url, {{
-                        method: method,
-                        headers: headers,
-                        body: JSON.stringify(data)
-                    }})
-                    .then(response => response.json())
-                    .then(data => {{
-                        if (data.status === 'success') {{
-                            if (!isLoggedIn) {{
-                                showCredentials(data.credentials, data.profile_url);
-                            }} else {{
-                                alert('Данные успешно обновлены');
-                            }}
-                        }} else {{
-                            if (data.errors) {{
-                                displayServerErrors(data.errors);
-                            }} else {{
-                                alert(data.message || 'Произошла ошибка');
-                            }}
-                        }}
-                    }})
-                    .catch(error => {{
-                        console.error('API error:', error);
-                        form.submit();
-                    }});
-                }}
-                function displayServerErrors(errors) {{
-                    document.querySelectorAll('.error-message').forEach(el => el.textContent = '');
-                    document.querySelectorAll('.error').forEach(el => el.classList.remove('error'));
-                    for (const field in errors) {{
-                        const errorElement = document.querySelector(`span.${{field}}_error`);
-                        const inputElement = document.querySelector(`[name="${{field}}"]`) || 
-                                           document.querySelector(`[name="${{field}}[]"]`);
-                        if (errorElement) {{
-                            errorElement.textContent = errors[field];
-                        }}
-                        if (inputElement) {{
-                            inputElement.classList.add('error');
-                        }}
-                    }}
-                }}
-                function showCredentials(credentials, profileUrl) {{
-                    const credentialsDiv = document.createElement('div');
-                    credentialsDiv.className = 'credentials';
-                    credentialsDiv.innerHTML = `
-                        <h3>Ваши учетные данные (сохраните их):</h3>
-                        <p><strong>Логин:</strong> ${{credentials.username}}</p>
-                        <p><strong>Пароль:</strong> ${{credentials.password}}</p>
-                        <p><strong>Ссылка на профиль:</strong> ${{profileUrl}}</p>
-                    `;
-                    document.cookie = `username=${{credentials.username}}; path=/`;
-                    document.cookie = `password=${{credentials.password}}; path=/`;
-                    form.parentNode.insertBefore(credentialsDiv, form);
-                    const logoutForm = document.createElement('form');
-                    logoutForm.id = 'logoutForm';
-                    logoutForm.action = 'submit_form.py';
-                    logoutForm.method = 'POST';
-                    logoutForm.innerHTML = `
-                        <input type="hidden" name="action" value="logout">
-                        <button type="submit" class="logout-button">Выйти</button>
-                    `;
-                    form.parentNode.insertBefore(logoutForm, form.nextSibling);
-                    document.querySelector('.login-section').style.display = 'none';
-                }}
-            }});
+            {script}
         </script>
     </head>
     <body>
@@ -314,41 +354,41 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
         {credentials_section}
         {logout_button}
         <form id="mainForm" action="submit_form.py" method="POST" enctype="multipart/form-data">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="csrf_token" value="{csrf_token}">
             <label for="last_name">Фамилия:</label>
             <input type="text" id="last_name" name="last_name" maxlength="50" required
                    value="{last_name}" class="{last_name_error_class}">
-            <span class="error-message">{last_name_error}</span><br>
+            <span class="error-message last_name_error">{last_name_error}</span><br>
 
             <label for="first_name">Имя:</label>
             <input type="text" id="first_name" name="first_name" maxlength="50" required
                    value="{first_name}" class="{first_name_error_class}">
-            <span class="error-message">{first_name_error}</span><br>
+            <span class="error-message first_name_error">{first_name_error}</span><br>
 
             <label for="patronymic">Отчество:</label>
             <input type="text" id="patronymic" name="patronymic" maxlength="50"
                    value="{patronymic}" class="{patronymic_error_class}">
-            <span class="error-message">{patronymic_error}</span><br>
+            <span class="error-message patronymic_error">{patronymic_error}</span><br>
 
             <label for="phone">Телефон:</label>
             <input type="tel" id="phone" name="phone" maxlength="15"
                    value="{phone}" class="{phone_error_class}">
-            <span class="error-message">{phone_error}</span><br>
+            <span class="error-message phone_error">{phone_error}</span><br>
 
             <label for="email">Email:</label>
             <input type="email" id="email" name="email" maxlength="100" required
                    value="{email}" class="{email_error_class}">
-            <span class="error-message">{email_error}</span><br>
+            <span class="error-message email_error">{email_error}</span><br>
 
             <label for="birthdate">Дата рождения:</label>
             <input type="date" id="birthdate" name="birthdate" required
                    value="{birthdate}" class="{birthdate_error_class}">
-            <span class="error-message">{birthdate_error}</span><br>
+            <span class="error-message birthdate_error">{birthdate_error}</span><br>
 
             <label>Пол:</label>
             <label><input type="radio" name="gender" value="male" {male_checked}> Мужской</label>
             <label><input type="radio" name="gender" value="female" {female_checked}> Женский</label>
-            <span class="error-message">{gender_error}</span><br>
+            <span class="error-message gender_error">{gender_error}</span><br>
 
             <label for="languages">Любимые языки программирования:</label>
             <select name="languages[]" id="languages" multiple size="5">
@@ -365,14 +405,14 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
                 <option value="Scala" {scala_selected}>Scala</option>
                 <option value="Go" {go_selected}>Go</option>
             </select>
-            <span class="error-message">{languages_error}</span><br>
+            <span class="error-message languages_error">{languages_error}</span><br>
 
             <label for="bio">Биография:</label>
             <textarea id="bio" name="bio" rows="4" cols="40" class="{bio_error_class}">{bio}</textarea>
-            <span class="error-message">{bio_error}</span><br>
+            <span class="error-message bio_error">{bio_error}</span><br>
 
             <label><input type="checkbox" name="contract" {contract_checked}> С контрактом ознакомлен(а)</label>
-            <span class="error-message">{contract_error}</span><br>
+            <span class="error-message contract_error">{contract_error}</span><br>
 
             <button type="submit">Сохранить</button>
         </form>
@@ -382,16 +422,15 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
         </noscript>
     </body>
     </html>
-    """.format(is_logged_in=str(is_logged_in).lower(), **context)
+    """.format(**context)
 
-    return html
+    return html_template
 
-# Генерация CSRF токена
 def generate_csrf_token():
     return secrets.token_hex(16)
 
 def validate_csrf_token(token):
-    return True  # Упрощённая реализация — заменить на реальную проверку по сессии
+    return True
 
 def generate_credentials():
     username = secrets.token_hex(8)
@@ -553,14 +592,17 @@ if __name__ == "__main__":
                 cookie['session_id']['expires'] = (datetime.now() + timedelta(days=1)).strftime('%a, %d %b %Y %H:%M:%S GMT')
                 cursor = connection.cursor()
                 try:
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                         INSERT INTO sessions (session_id, username, expires_at)
                         VALUES (%s, %s, %s)
-                    """, (
-                        session_id,
-                        username,
-                        datetime.now() + timedelta(days=1)
-                    ))
+                        """,
+                        (
+                            session_id,
+                            username,
+                            datetime.now() + timedelta(days=1)
+                        )
+                    )
                     connection.commit()
                 finally:
                     cursor.close()
@@ -649,14 +691,10 @@ if __name__ == "__main__":
     if request_method == 'POST' and not action:
         errors = validate_form(data)
         if errors:
-            for field, message in errors.items():
-                cookie[field + '_error'] = message
-                cookie[field + '_error']['path'] = '/'
-                cookie[field + '_error']['expires'] = 0
             print("Content-Type: text/html; charset=utf-8")
-            print(cookie.output())
             print()
             print(generate_html_form(data, errors, is_logged_in))
+            exit()
         else:
             for field in data.keys():
                 if f'{field}_error' in cookie:
