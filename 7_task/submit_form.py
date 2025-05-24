@@ -8,11 +8,12 @@ import os
 import secrets
 import hashlib
 import html
+import json
 
 def create_connection():
     try:
         return pymysql.connect(
-            host='51.250.35.238',
+            host='158.160.171.1',
             user='u68593',
             password='9258357',
             database='web_db',
@@ -57,7 +58,6 @@ def validate_form(data):
     return errors
 
 def escape_html(text):
-    """Экранирование HTML-символов для предотвращения XSS"""
     return html.escape(str(text), quote=True)
 
 def generate_html_form(data, errors, is_logged_in=False, credentials=None):
@@ -66,7 +66,7 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
         login_section = """
         <div class="login-section">
             <h2>Вход</h2>
-            <form action="submit_form.py" method="POST">
+            <form id="loginForm" action="submit_form.py" method="POST">
                 <input type="hidden" name="action" value="login">
                 <label for="username">Логин:</label>
                 <input type="text" id="username" name="username" required>
@@ -76,6 +76,7 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
             </form>
         </div>
         """
+
     credentials_section = ""
     if credentials:
         credentials_section = f"""
@@ -85,14 +86,16 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
             <p><strong>Пароль:</strong> {escape_html(credentials['password'])}</p>
         </div>
         """
+
     logout_button = ""
     if is_logged_in:
         logout_button = """
-        <form action="submit_form.py" method="POST">
+        <form id="logoutForm" action="submit_form.py" method="POST">
             <input type="hidden" name="action" value="logout">
             <button type="submit" class="logout-button">Выйти</button>
         </form>
         """
+    csrf_token_value = escape_html(generate_csrf_token())
 
     context = {
         'last_name': escape_html(data.get('last_name', '')),
@@ -133,10 +136,14 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
         'phone_error_class': 'error' if 'phone' in errors else '',
         'email_error_class': 'error' if 'email' in errors else '',
         'birthdate_error_class': 'error' if 'birthdate' in errors else '',
-        'bio_error_class': 'error' if 'bio' in errors else ''
+        'bio_error_class': 'error' if 'bio' in errors else '',
+	'csrf_token': csrf_token_value,
+        'login_section': login_section,
+        'credentials_section': credentials_section,
+        'logout_button': logout_button
     }
 
-    html = f"""
+    html = """
     <!DOCTYPE html>
     <html lang="ru">
     <head>
@@ -144,72 +151,240 @@ def generate_html_form(data, errors, is_logged_in=False, credentials=None):
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Форма</title>
         <link rel="stylesheet" href="styles.css">
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {{
+                const form = document.getElementById('mainForm');
+                if (!form) return;
+                form.addEventListener('submit', function(e) {{
+                    e.preventDefault();
+                    const formData = {{
+                        last_name: form.last_name.value,
+                        first_name: form.first_name.value,
+                        patronymic: form.patronymic.value,
+                        phone: form.phone.value,
+                        email: form.email.value,
+                        birthdate: form.birthdate.value,
+                        gender: form.querySelector('input[name="gender"]:checked')?.value,
+                        languages: Array.from(form.querySelectorAll('select[name="languages[]"] option:checked')).map(o => o.value),
+                        bio: form.bio.value,
+                        contract: form.contract.checked
+                    }};
+                    const errors = validateForm(formData);
+                    if (Object.keys(errors).length > 0) {{
+                        displayErrors(errors);
+                        return;
+                    }}
+                    const isLoggedIn = {is_logged_in};
+                    const url = isLoggedIn ? '/api/profile/' + window.location.pathname.split('/').pop() : '/api/register';
+                    const method = isLoggedIn ? 'PUT' : 'POST';
+                    sendFormData(url, method, formData, isLoggedIn);
+                }});
+                function validateForm(data) {{
+                    const errors = {{}};
+                    const patterns = {{
+                        'last_name': /^[А-Яа-яЁё]+$/,
+                        'first_name': /^[А-Яа-яЁё]+$/,
+                        'patronymic': /^[А-Яа-яЁё]*$/,
+                        'phone': /^\\+?\\d{{10,15}}$/,
+                        'email': /^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$/,
+                        'birthdate': /^\\d{{4}}-\\d{{2}}-\\d{{2}}$/,
+                        'bio': /^.{{10,}}$/
+                    }};
+                    for (const field in patterns) {{
+                        if (data[field] && !patterns[field].test(data[field])) {{
+                            errors[field] = true;
+                        }}
+                    }}
+                    if (!data.gender) errors.gender = true;
+                    if (!data.languages || data.languages.length === 0) errors.languages = true;
+                    if (!data.contract) errors.contract = true;
+                    return errors;
+                }}
+                function displayErrors(errors) {{
+                    document.querySelectorAll('.error-message').forEach(el => el.textContent = '');
+                    document.querySelectorAll('.error').forEach(el => el.classList.remove('error'));
+                    for (const field in errors) {{
+                        const errorElement = document.querySelector(`span.${{field}}_error`);
+                        const inputElement = document.querySelector(`[name="${{field}}"]`) || 
+                                           document.querySelector(`[name="${{field}}[]"]`);
+                        if (errorElement) {{
+                            errorElement.textContent = getErrorMessage(field);
+                        }}
+                        if (inputElement) {{
+                            inputElement.classList.add('error');
+                        }}
+                    }}
+                }}
+                function getErrorMessage(field) {{
+                    const messages = {{
+                        'last_name': "Фамилия должна содержать только буквы кириллицы.",
+                        'first_name': "Имя должно содержать только буквы кириллицы.",
+                        'patronymic': "Отчество должно содержать только буквы кириллицы (если указано).",
+                        'phone': "Телефон должен быть длиной от 10 до 15 цифр и может начинаться с '+'",
+                        'email': "Некорректный email. Пример: example@domain.com",
+                        'birthdate': "Дата рождения должна быть в формате YYYY-MM-DD.",
+                        'bio': "Биография должна содержать не менее 10 символов.",
+                        'gender': "Выберите пол.",
+                        'languages': "Выберите хотя бы один язык программирования.",
+                        'contract': "Необходимо подтвердить ознакомление с контрактом."
+                    }};
+                    return messages[field] || 'Ошибка в поле';
+                }}
+                function sendFormData(url, method, data, isLoggedIn) {{
+                    const headers = {{
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    }};
+                    if (isLoggedIn) {{
+                        const username = document.cookie.replace(/(?:(?:^|.*;\s*)username\s*=\s*([^;]*).*$)|^.*$/, "$1");
+                        const password = document.cookie.replace(/(?:(?:^|.*;\s*)password\s*=\s*([^;]*).*$)|^.*$/, "$1");
+                        if (username && password) {{
+                            headers['Authorization'] = 'Basic ' + btoa(username + ':' + password);
+                        }}
+                    }}
+                    fetch(url, {{
+                        method: method,
+                        headers: headers,
+                        body: JSON.stringify(data)
+                    }})
+                    .then(response => response.json())
+                    .then(data => {{
+                        if (data.status === 'success') {{
+                            if (!isLoggedIn) {{
+                                showCredentials(data.credentials, data.profile_url);
+                            }} else {{
+                                alert('Данные успешно обновлены');
+                            }}
+                        }} else {{
+                            if (data.errors) {{
+                                displayServerErrors(data.errors);
+                            }} else {{
+                                alert(data.message || 'Произошла ошибка');
+                            }}
+                        }}
+                    }})
+                    .catch(error => {{
+                        console.error('API error:', error);
+                        form.submit();
+                    }});
+                }}
+                function displayServerErrors(errors) {{
+                    document.querySelectorAll('.error-message').forEach(el => el.textContent = '');
+                    document.querySelectorAll('.error').forEach(el => el.classList.remove('error'));
+                    for (const field in errors) {{
+                        const errorElement = document.querySelector(`span.${{field}}_error`);
+                        const inputElement = document.querySelector(`[name="${{field}}"]`) || 
+                                           document.querySelector(`[name="${{field}}[]"]`);
+                        if (errorElement) {{
+                            errorElement.textContent = errors[field];
+                        }}
+                        if (inputElement) {{
+                            inputElement.classList.add('error');
+                        }}
+                    }}
+                }}
+                function showCredentials(credentials, profileUrl) {{
+                    const credentialsDiv = document.createElement('div');
+                    credentialsDiv.className = 'credentials';
+                    credentialsDiv.innerHTML = `
+                        <h3>Ваши учетные данные (сохраните их):</h3>
+                        <p><strong>Логин:</strong> ${{credentials.username}}</p>
+                        <p><strong>Пароль:</strong> ${{credentials.password}}</p>
+                        <p><strong>Ссылка на профиль:</strong> ${{profileUrl}}</p>
+                    `;
+                    document.cookie = `username=${{credentials.username}}; path=/`;
+                    document.cookie = `password=${{credentials.password}}; path=/`;
+                    form.parentNode.insertBefore(credentialsDiv, form);
+                    const logoutForm = document.createElement('form');
+                    logoutForm.id = 'logoutForm';
+                    logoutForm.action = 'submit_form.py';
+                    logoutForm.method = 'POST';
+                    logoutForm.innerHTML = `
+                        <input type="hidden" name="action" value="logout">
+                        <button type="submit" class="logout-button">Выйти</button>
+                    `;
+                    form.parentNode.insertBefore(logoutForm, form.nextSibling);
+                    document.querySelector('.login-section').style.display = 'none';
+                }}
+            }});
+        </script>
     </head>
     <body>
         {login_section}
         {credentials_section}
         {logout_button}
-        <form action="submit_form.py" method="POST">
-            <input type="hidden" name="csrf_token" value="{escape_html(generate_csrf_token())}">
+        <form id="mainForm" action="submit_form.py" method="POST" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <label for="last_name">Фамилия:</label>
             <input type="text" id="last_name" name="last_name" maxlength="50" required
-                   value="{{last_name}}" class="{{last_name_error_class}}">
-            <span class="error-message">{{last_name_error}}</span><br>
+                   value="{last_name}" class="{last_name_error_class}">
+            <span class="error-message">{last_name_error}</span><br>
+
             <label for="first_name">Имя:</label>
             <input type="text" id="first_name" name="first_name" maxlength="50" required
-                   value="{{first_name}}" class="{{first_name_error_class}}">
-            <span class="error-message">{{first_name_error}}</span><br>
+                   value="{first_name}" class="{first_name_error_class}">
+            <span class="error-message">{first_name_error}</span><br>
+
             <label for="patronymic">Отчество:</label>
             <input type="text" id="patronymic" name="patronymic" maxlength="50"
-                   value="{{patronymic}}" class="{{patronymic_error_class}}">
-            <span class="error-message">{{patronymic_error}}</span><br>
+                   value="{patronymic}" class="{patronymic_error_class}">
+            <span class="error-message">{patronymic_error}</span><br>
+
             <label for="phone">Телефон:</label>
-            <input type="tel" id="phone" name="phone" required
-                   value="{{phone}}" class="{{phone_error_class}}">
-            <span class="error-message">{{phone_error}}</span><br>
-            <label for="email">E-mail:</label>
-            <input type="email" id="email" name="email" required
-                   value="{{email}}" class="{{email_error_class}}">
-            <span class="error-message">{{email_error}}</span><br>
+            <input type="tel" id="phone" name="phone" maxlength="15"
+                   value="{phone}" class="{phone_error_class}">
+            <span class="error-message">{phone_error}</span><br>
+
+            <label for="email">Email:</label>
+            <input type="email" id="email" name="email" maxlength="100" required
+                   value="{email}" class="{email_error_class}">
+            <span class="error-message">{email_error}</span><br>
+
             <label for="birthdate">Дата рождения:</label>
             <input type="date" id="birthdate" name="birthdate" required
-                   value="{{birthdate}}" class="{{birthdate_error_class}}">
-            <span class="error-message">{{birthdate_error}}</span><br>
+                   value="{birthdate}" class="{birthdate_error_class}">
+            <span class="error-message">{birthdate_error}</span><br>
+
             <label>Пол:</label>
-            <label for="male">Мужской</label>
-            <input type="radio" id="male" name="gender" value="male" required {{male_checked}}>
-            <label for="female">Женский</label>
-            <input type="radio" id="female" name="gender" value="female" required {{female_checked}}>
-            <span class="error-message">{{gender_error}}</span><br>
-            <label for="languages">Любимый язык программирования:</label>
-            <select id="languages" name="languages[]" multiple required>
-                <option value="Pascal" {{pascal_selected}}>Pascal</option>
-                <option value="C" {{c_selected}}>C</option>
-                <option value="C++" {{cpp_selected}}>C++</option>
-                <option value="JavaScript" {{javascript_selected}}>JavaScript</option>
-                <option value="PHP" {{php_selected}}>PHP</option>
-                <option value="Python" {{python_selected}}>Python</option>
-                <option value="Java" {{java_selected}}>Java</option>
-                <option value="Haskel" {{haskel_selected}}>Haskel</option>
-                <option value="Clojure" {{clojure_selected}}>Clojure</option>
-                <option value="Prolog" {{prolog_selected}}>Prolog</option>
-                <option value="Scala" {{scala_selected}}>Scala</option>
-                <option value="Go" {{go_selected}}>Go</option>
+            <label><input type="radio" name="gender" value="male" {male_checked}> Мужской</label>
+            <label><input type="radio" name="gender" value="female" {female_checked}> Женский</label>
+            <span class="error-message">{gender_error}</span><br>
+
+            <label for="languages">Любимые языки программирования:</label>
+            <select name="languages[]" id="languages" multiple size="5">
+                <option value="Pascal" {pascal_selected}>Pascal</option>
+                <option value="C" {c_selected}>C</option>
+                <option value="C++" {cpp_selected}>C++</option>
+                <option value="JavaScript" {javascript_selected}>JavaScript</option>
+                <option value="PHP" {php_selected}>PHP</option>
+                <option value="Python" {python_selected}>Python</option>
+                <option value="Java" {java_selected}>Java</option>
+                <option value="Haskel" {haskel_selected}>Haskel</option>
+                <option value="Clojure" {clojure_selected}>Clojure</option>
+                <option value="Prolog" {prolog_selected}>Prolog</option>
+                <option value="Scala" {scala_selected}>Scala</option>
+                <option value="Go" {go_selected}>Go</option>
             </select>
-            <span class="error-message">{{languages_error}}</span><br>
+            <span class="error-message">{languages_error}</span><br>
+
             <label for="bio">Биография:</label>
-            <textarea id="bio" name="bio" rows="4" required class="{{bio_error_class}}">{{bio}}</textarea>
-            <span class="error-message">{{bio_error}}</span><br>
-            <label for="contract">С контрактом ознакомлен(а)</label>
-            <input type="checkbox" id="contract" name="contract" required {{contract_checked}}>
-            <span class="error-message">{{contract_error}}</span><br>
+            <textarea id="bio" name="bio" rows="4" cols="40" class="{bio_error_class}">{bio}</textarea>
+            <span class="error-message">{bio_error}</span><br>
+
+            <label><input type="checkbox" name="contract" {contract_checked}> С контрактом ознакомлен(а)</label>
+            <span class="error-message">{contract_error}</span><br>
+
             <button type="submit">Сохранить</button>
         </form>
+        <noscript>
+            <style>#mainForm {{ display: block !important; }}</style>
+            <p>Для работы с формой требуется JavaScript. Пожалуйста, включите JavaScript в вашем браузере.</p>
+        </noscript>
     </body>
     </html>
-    """
+    """.format(is_logged_in=str(is_logged_in).lower(), **context)
 
-    return html.format(**context)
+    return html
 
 # Генерация CSRF токена
 def generate_csrf_token():
@@ -269,6 +444,7 @@ def insert_user_data(connection, data, credentials=None):
             'Python': 6, 'Java': 7, 'Haskel': 8, 'Clojure': 9,
             'Prolog': 10, 'Scala': 11, 'Go': 12
         }
+
         for language in data['languages']:
             language_id = language_ids.get(language)
             if language_id:
@@ -279,6 +455,7 @@ def insert_user_data(connection, data, credentials=None):
 
         connection.commit()
         return credentials
+
     except pymysql.Error as e:
         print("Content-Type: text/html; charset=utf-8")
         print()
@@ -355,8 +532,8 @@ if __name__ == "__main__":
     form = cgi.FieldStorage()
     request_method = os.environ.get('REQUEST_METHOD', '')
     action = form.getvalue('action')
-
     csrf_token = form.getvalue('csrf_token')
+
     if request_method == 'POST' and not action:
         if not validate_csrf_token(csrf_token):
             print("Content-Type: text/html; charset=utf-8")
@@ -399,6 +576,7 @@ if __name__ == "__main__":
         print()
         print("<h1>Неверный логин или пароль</h1>")
         exit()
+
     elif action == 'logout' and request_method == 'POST':
         session_id = cookie.get('session_id')
         if session_id:
